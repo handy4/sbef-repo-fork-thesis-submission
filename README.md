@@ -348,7 +348,7 @@ The original defaults were too optimistic for the updated vLLM/model stack on th
 
 ## Environment Variables
 
-If there are issues with newer models or the flashinfer smapler, use the following environment variables:
+If there are issues with newer models or the flashinfer sampler, use the following environment variables:
 
 ```bash
 export VLLM_USE_DEEP_GEMM=0
