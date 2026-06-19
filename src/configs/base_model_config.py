@@ -110,3 +110,52 @@ class ModelConfig(PBM, arbitrary_types_allowed=True):  # type: ignore
         default=42,
         description="Seed to use for the model",
     )
+
+    gpu_memory_utilization: float = Field(
+        default=0.8,
+        description="Fraction of GPU memory vLLM may reserve for the model executor",
+    )
+    max_model_len: Optional[int] = Field(
+        default=None,
+        description="Maximum context length passed to vLLM",
+    )
+    max_cudagraph_capture_size: Optional[int] = Field(
+        default=None,
+        description="Maximum CUDA graph capture size passed to vLLM",
+    )
+    enforce_eager: bool = Field(
+        default=False,
+        description="Whether to disable CUDA graph capture in vLLM",
+    )
+    language_model_only: bool = Field(
+        default=False,
+        description="Whether to load only the language-model path for multimodal architectures",
+    )
+    tensor_parallel_size: Optional[int] = Field(
+        default=None,
+        description="Number of GPUs to use for vLLM tensor parallelism",
+    )
+    disable_custom_all_reduce: bool = Field(
+        default=False,
+        description="Whether to disable vLLM custom all-reduce kernels",
+    )
+    attention_backend: Optional[str] = Field(
+        default=None,
+        description="Attention backend passed to vLLM, for example TRITON_ATTN",
+    )
+    tokenizer_mode: Optional[str] = Field(
+        default=None,
+        description="Tokenizer mode passed to vLLM, for example mistral",
+    )
+    config_format: Optional[str] = Field(
+        default=None,
+        description="Config format passed to vLLM, for example mistral",
+    )
+    load_format: Optional[str] = Field(
+        default=None,
+        description="Weight load format passed to vLLM, for example mistral",
+    )
+    use_chat_template_for_generate: Optional[bool] = Field(
+        default=None,
+        description="Whether plain string generation should be wrapped as a user chat message before vLLM generation",
+    )
