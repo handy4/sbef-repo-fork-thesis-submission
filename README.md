@@ -45,6 +45,14 @@ Create the two Conda environments needed to run the Social Bias Evaluation Frame
   conda env create -f framework_env.yaml
   ```
 
+* To make the framework work with recent models, update the framework using the ```framework_env_vllm_0.17.1.yaml``` file and manually update vllm to v0.21.0 and Transformers to v5.8.1:
+
+  ```bash
+  conda activate bias_eval
+  conda env update -f framework_env_vllm_0.17.1.yaml 
+  python -m pip install --upgrade "vllm==0.21.0" "transformers==5.8.1"
+  ```
+
 * [Optional] To set up the quantization library environment, use the ```compression_env.yaml``` file:
 
   ```bash
@@ -156,3 +164,200 @@ python helper_tools/compute_model_size.py
   bibsource    = {dblp computer science bibliography, https://dblp.org}
 }
 ```
+
+# Code Changes Summary
+
+## Main Goal
+
+The original framework was written against older model and vLLM behavior. After updating `vllm` and `transformers` for newer models, several modern instruction models exposed compatibility issues:
+
+- Mistral/Ministral/Pixtral models needed Mistral-specific vLLM loading/tokenizer options.
+- Some vLLM defaults caused memory pressure, CUDA graph stalls, or backend-specific failures on the Slurm system.
+- Some chat-template models generated empty text when benchmarks used raw string prompts.
+- Some tokenizer objects exposed by newer vLLM versions did not support the older token-counting assumptions.
+
+## vLLM Model Wrapper
+
+Changed files:
+
+- `src/models/base/vllm_model.py`
+
+### Added Runtime Configuration Pass-Through
+
+The wrapper now reads additional model config fields and passes them to `vllm.LLM(...)`:
+
+- `gpu_memory_utilization`
+- `max_model_len`
+- `max_cudagraph_capture_size`
+- `enforce_eager`
+- `language_model_only`
+- `tensor_parallel_size`
+- `disable_custom_all_reduce`
+- `attention_backend`
+- `tokenizer_mode`
+- `config_format`
+- `load_format`
+- `use_chat_template_for_generate`
+
+Reason:
+
+Newer vLLM releases expose important compatibility and stability controls through `LLM(...)` arguments. The original wrapper did not expose these controls, which made it hard to work around memory pressure, CUDA graph capture issues, multimodal architecture loading, attention backend problems, and tensor-parallel behavior on the Slurm machine.
+
+### Safer Tensor Parallel Handling
+
+The wrapper now chooses `tensor_parallel_size` from config when provided, and clamps it to the number of visible GPUs.
+
+Reason:
+
+The original behavior used all visible GPUs automatically. That was inconvenient for debugging, could conflict with Slurm allocation details, and could trigger custom all-reduce or multi-GPU behavior that was not needed for smaller/debug runs.
+
+### Mistral/Ministral/Pixtral vLLM Format Handling
+
+For model/tokenizer paths matching `ministral-3`, `mistral-3`, or `pixtral`, the wrapper now defaults these vLLM options:
+
+- `tokenizer_mode="mistral"`
+- `config_format="mistral"`
+- `load_format="mistral"`
+
+The tokenizer loader also enables `fix_mistral_regex=True` for Mistral/Ministral tokenizers.
+
+Reason:
+
+The newer Mistral-family models are not always loadable with vLLM's generic Hugging Face path. They need Mistral-aware config/tokenizer/loading behavior to avoid architecture, tokenizer, or malformed-regex failures.
+
+### Language-Model-Only Loading
+
+The wrapper can pass `language_model_only=True` to vLLM.
+
+Reason:
+
+Some models, especially Pixtral-like architectures, resolve as conditional-generation or multimodal architectures even when the benchmark only needs text generation. Loading only the language model avoids unnecessary multimodal paths and related compatibility issues.
+
+### More Robust Chat Generation
+
+`generate_chat()` was expanded to support:
+
+- vLLM's native `model.chat(...)` API when available.
+- Manual rendering with `tokenizer.apply_chat_template(...)` as a fallback.
+- A raw text fallback when no chat template exists.
+- Splitting chats with an empty final assistant message from normal chats.
+- For empty assistant prefills, forcing `add_generation_prompt=True` and `continue_final_message=False`.
+
+Reason:
+
+Several benchmarks use chat-shaped prompts with assistant prefill text. Newer tokenizer/vLLM combinations can reject empty assistant prefills or handle `continue_final_message` differently. Splitting those cases avoids hangs or empty outputs while preserving intended prefill behavior where it exists.
+
+### EuroLLM Raw Prompt Fix
+
+`generate()` now automatically wraps raw string prompts as a single user chat message for EuroLLM models when the tokenizer has a chat template. This can also be forced or disabled through:
+
+```yaml
+use_chat_template_for_generate: true
+```
+
+or:
+
+```yaml
+use_chat_template_for_generate: false
+```
+
+Reason:
+
+EuroLLM-22B-Instruct worked on `bold` because that benchmark used `generate_chat()`, but produced empty generations on `wino_bias`, `bbq`, `dt_fairness`, `discrim_eval_gen`, and similar raw-prompt benchmarks. The likely cause was that EuroLLM expects ChatML/chat-template formatting; raw prompts caused immediate EOS. Wrapping raw prompts through the chat template makes those benchmarks use the format expected by the instruct model.
+
+### Shared Generation Extraction
+
+Generation text extraction and token-statistic updates were centralized in `_extract_generation_text(...)`.
+
+Reason:
+
+Both raw and chat generation paths need the same output normalization and token accounting. Centralizing it reduced duplicated logic and made later fixes apply consistently.
+
+### Token Counting Compatibility
+
+`get_num_gen_tokens()` now handles tokenizers that do not provide `batch_encode_plus`, including vLLM tokenizer backends that expose different callable/encoding APIs.
+
+Reason:
+
+Some newer vLLM tokenizer wrappers are not full Hugging Face tokenizer objects. The original token-counting logic could fail during BOLD/DT toxicity scoring after generation had already succeeded.
+
+## Model Config Schema
+
+Changed files:
+
+- `src/configs/base_model_config.py`
+
+Added Pydantic fields:
+
+- `gpu_memory_utilization`
+- `max_model_len`
+- `max_cudagraph_capture_size`
+- `enforce_eager`
+- `language_model_only`
+- `tensor_parallel_size`
+- `disable_custom_all_reduce`
+- `attention_backend`
+- `tokenizer_mode`
+- `config_format`
+- `load_format`
+- `use_chat_template_for_generate`
+
+Reason:
+
+The YAML model configs needed to accept the new vLLM runtime controls without validation errors. These fields are consumed by the patched vLLM wrapper.
+
+## Default Model Configs
+
+Changed files:
+
+- `configs/models/default.yaml`
+- `configs/models/default_debug.yaml`
+
+The default config was made more conservative:
+
+```yaml
+batch_size: 64
+gpu_memory_utilization: 0.65
+max_model_len: 8192
+max_cudagraph_capture_size: 64
+enforce_eager: true
+language_model_only: true
+tensor_parallel_size: 1
+disable_custom_all_reduce: true
+attention_backend: "TRITON_ATTN"
+```
+
+The debug config uses smaller limits:
+
+```yaml
+batch_size: 8
+max_gen_toks: 512
+gpu_memory_utilization: 0.5
+max_model_len: 4096
+max_cudagraph_capture_size: 16
+enforce_eager: true
+language_model_only: true
+tensor_parallel_size: 1
+disable_custom_all_reduce: true
+attention_backend: "TRITON_ATTN"
+```
+
+Reason:
+
+The original defaults were too optimistic for the updated vLLM/model stack on the Slurm system. The new defaults reduce memory pressure, avoid CUDA graph capture stalls, avoid custom all-reduce issues, and prefer the Triton attention backend after FlashInfer-related failures.
+
+## Environment Variables
+
+If there are issues with newer models or the flashinfer smapler, use the following environment variables:
+
+```bash
+export VLLM_USE_DEEP_GEMM=0
+export VLLM_DEEP_GEMM_WARMUP=skip
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export VLLM_ATTENTION_BACKEND=TRITON_ATTN
+```
+
+
+Reason:
+
+The updated vLLM installation attempted to use newer optional kernels/backends that were either unavailable, unstable, or incompatible with the cluster environment. These exports disable problematic DeepGEMM/FlashInfer behavior and force the attention backend used successfully in later runs.
